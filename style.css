@@ -1,0 +1,11 @@
+:root { font-family: system-ui, Arial; }
+body { margin: 0; min-height: 100vh; display: grid; place-items: center; background: #f6f7fb; }
+.card { width: min(900px, 92vw); background: #fff; border: 1px solid #e7e7e7; border-radius: 14px; padding: 18px; box-shadow: 0 10px 30px rgba(0,0,0,.06); }
+.row { display: flex; gap: 12px; align-items: center; margin-top: 12px; flex-wrap: wrap; }
+button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; background: #111; color: #fff; cursor: pointer; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+#download { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; text-decoration: none; }
+.hidden { display: none; }
+pre { margin-top: 14px; background: #0b1020; color: #d5e2ff; padding: 12px; border-radius: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; }
+.progress { margin-top: 12px; height: 10px; border-radius: 999px; background: #eee; overflow: hidden; }
+#bar { height: 100%; width: 0%; background: #111; transition: width .15s linear; }

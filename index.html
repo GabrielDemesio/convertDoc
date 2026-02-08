@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="pt-br">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>DACTE (PDF/JPEG) → CSV</title>
+    <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+<main class="card">
+    <h1>Upload → CSV</h1>
+    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF.</p>
+
+    <input id="file" type="file" accept="application/pdf,image/jpeg,image/jpg,image/png" multiple />
+
+    <div class="row">
+        <button id="run">Processar</button>
+        <a id="download" class="hidden">Baixar CSV</a>
+    </div>
+
+    <div class="progress">
+        <div id="bar"></div>
+    </div>
+
+    <pre id="log"></pre>
+</main>
+
+<!-- PDF.js (legacy build exposes global pdfjsLib) -->
+<script src="https://unpkg.com/pdfjs-dist@3.11.174/legacy/build/pdf.min.js"></script>
+<script>
+    // worker do PDF.js (legacy)
+    if (window.pdfjsLib) {
+        window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+            "https://unpkg.com/pdfjs-dist@3.11.174/legacy/build/pdf.worker.min.js";
+    }
+</script>
+
+<!-- Tesseract.js -->
+<script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+
+<script src="script.js"></script>
+</body>
+</html>
