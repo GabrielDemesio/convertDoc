@@ -3,12 +3,20 @@ const $run = document.getElementById("run");
 const $log = document.getElementById("log");
 const $download = document.getElementById("download");
 const $renamed = document.getElementById("renamed");
+const $queue = document.getElementById("queue");
 const $bar = document.getElementById("bar");
 let renamedObjectUrls = [];
+const FILE_CONCURRENCY = 2;
+let queueItemsState = [];
+let queueProgressMode = false;
 
 function log(msg) { $log.textContent += msg + "\n"; }
 function clearLog() { $log.textContent = ""; }
 function setProgress(p) { $bar.style.width = `${Math.max(0, Math.min(100, p))}%`; }
+function setOcrProgress(p) {
+    if (queueProgressMode) return;
+    setProgress(p);
+}
 
 function sanitizeFilePart(v) {
     return String(v || "")
@@ -1013,7 +1021,7 @@ async function ocrFromImageBlob(blob, label = "") {
     const { data } = await Tesseract.recognize(blob, "por", {
         logger: m => {
             if (m.status === "recognizing text" && typeof m.progress === "number") {
-                setProgress(Math.round(m.progress * 100));
+                setOcrProgress(Math.round(m.progress * 100));
             }
         }
     });
@@ -1087,85 +1095,209 @@ function renderRenamedLinks(downloads) {
     $renamed.classList.remove("hidden");
 }
 
+function queueLabel(status, detail = "") {
+    const labels = {
+        pending: "Na fila",
+        processing: "Processando",
+        done: "Concluído",
+        error: "Erro",
+        ignored: "Ignorado"
+    };
+    const base = labels[status] || "Na fila";
+    return detail ? `${base} • ${detail}` : base;
+}
+
+function updateQueueSummary() {
+    const total = queueItemsState.length;
+    const pending = queueItemsState.filter(i => i.status === "pending").length;
+    const processing = queueItemsState.filter(i => i.status === "processing").length;
+    const done = queueItemsState.filter(i => i.status === "done").length;
+    const error = queueItemsState.filter(i => i.status === "error").length;
+    const ignored = queueItemsState.filter(i => i.status === "ignored").length;
+    const $summary = $queue.querySelector(".queue-summary");
+    if (!$summary) return;
+    $summary.textContent =
+        `Total: ${total} | Na fila: ${pending} | Processando: ${processing} | Concluídos: ${done} | Erros: ${error} | Ignorados: ${ignored}`;
+}
+
+function renderQueue(files) {
+    queueItemsState = files.map((file, index) => ({
+        id: index,
+        file,
+        name: file.name,
+        status: "pending",
+        detail: "",
+        el: null,
+        stateEl: null
+    }));
+
+    $queue.innerHTML = "";
+    const title = document.createElement("h2");
+    title.textContent = "Fila de processamento";
+    const summary = document.createElement("div");
+    summary.className = "queue-summary";
+    const list = document.createElement("ul");
+    list.className = "queue-list";
+
+    for (const item of queueItemsState) {
+        const li = document.createElement("li");
+        li.className = "queue-item pending";
+        const name = document.createElement("span");
+        name.className = "queue-name";
+        name.textContent = item.name;
+        const state = document.createElement("span");
+        state.className = "queue-state";
+        state.textContent = queueLabel("pending");
+        li.appendChild(name);
+        li.appendChild(state);
+        list.appendChild(li);
+        item.el = li;
+        item.stateEl = state;
+    }
+
+    $queue.appendChild(title);
+    $queue.appendChild(summary);
+    $queue.appendChild(list);
+    $queue.classList.remove("hidden");
+    updateQueueSummary();
+    return queueItemsState;
+}
+
+function updateQueueItem(item, status, detail = "") {
+    item.status = status;
+    item.detail = detail;
+    if (item.el) item.el.className = `queue-item ${status}`;
+    if (item.stateEl) item.stateEl.textContent = queueLabel(status, detail);
+    updateQueueSummary();
+}
+
+async function runQueue(items, concurrency, worker) {
+    if (!items.length) return;
+    const limit = Math.max(1, Math.min(concurrency, items.length));
+    let nextIndex = 0;
+
+    async function runner() {
+        while (true) {
+            const i = nextIndex;
+            nextIndex += 1;
+            if (i >= items.length) return;
+            await worker(items[i], i);
+        }
+    }
+
+    const runners = Array.from({ length: limit }, () => runner());
+    await Promise.all(runners);
+}
+
+async function processPdfFile(file, item) {
+    log(`\nPDF: ${file.name}`);
+    updateQueueItem(item, "processing", "renderizando");
+    const pageImages = await pdfToPageImages(file);
+    const rows = [];
+    const nfCandidates = [];
+
+    for (let i = 0; i < pageImages.length; i++) {
+        updateQueueItem(item, "processing", `página ${i + 1}/${pageImages.length}`);
+        log(`OCR ${file.name} página ${i + 1}/${pageImages.length}...`);
+        const blob = dataUrlToBlob(pageImages[i]);
+        const ocr = await ocrFromImageSmart(blob);
+        let fields = extractFields(ocr.text, ocr.data);
+        fields = await refineNFWithCrop(fields, ocr);
+        rows.push(fields);
+        if (fields.NF) nfCandidates.push(fields.NF);
+        log(`OK ${file.name} pág ${i + 1}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
+    }
+
+    const bestPdfNF = pickBestCandidateNumber(nfCandidates, 4);
+    const renamedName = buildRenamedPdfName(bestPdfNF);
+    const pdfUrl = URL.createObjectURL(file);
+    renamedObjectUrls.push(pdfUrl);
+    updateQueueItem(item, "done", `${pageImages.length} página(s)`);
+    log(`Download renomeado: ${renamedName}`);
+
+    return {
+        rows,
+        renamedDownload: { url: pdfUrl, name: renamedName }
+    };
+}
+
+async function processImageFile(file, item) {
+    log(`\nIMG: ${file.name}`);
+    updateQueueItem(item, "processing", "OCR");
+    const ocr = await ocrFromImageSmart(file);
+    let fields = extractFields(ocr.text, ocr.data);
+    fields = await refineNFWithCrop(fields, ocr);
+    log(`OK ${file.name}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
+    updateQueueItem(item, "done", "1 imagem");
+    return { rows: [fields], renamedDownload: null };
+}
+
 $run.addEventListener("click", async () => {
     clearLog();
     setProgress(0);
     $download.classList.add("hidden");
     clearRenamedLinks();
+    $queue.classList.add("hidden");
+    $queue.innerHTML = "";
 
     const files = [...($file.files || [])];
     if (!files.length) return log("Selecione PDFs e/ou imagens (JPEG/PNG).");
 
     $run.disabled = true;
+    queueProgressMode = true;
 
-    const rows = [];
-    const renamedDownloads = [];
+    try {
+        const rows = [];
+        const renamedDownloads = [];
 
-    for (const f of files) {
-        const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
-        const isImage = f.type.startsWith("image/");
+        const queueItems = renderQueue(files);
+        let completed = 0;
 
-        try {
-            if (isPdf) {
-                log(`\nPDF: ${f.name}`);
-                const pageImages = await pdfToPageImages(f);
-                const nfCandidates = [];
+        await runQueue(queueItems, FILE_CONCURRENCY, async (item) => {
+            const f = item.file;
+            const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
+            const isImage = f.type.startsWith("image/");
 
-                // Faz OCR em cada página e extrai 1 linha por página
-                for (let i = 0; i < pageImages.length; i++) {
-                    log(`OCR página ${i + 1}/${pageImages.length}...`);
-                    const blob = dataUrlToBlob(pageImages[i]);
-                    const ocr = await ocrFromImageSmart(blob);
-                    let fields = extractFields(ocr.text, ocr.data);
-                    fields = await refineNFWithCrop(fields, ocr);
-                    rows.push(fields);
-                    if (fields.NF) nfCandidates.push(fields.NF);
-
-                    log(`OK pág ${i + 1}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
-                    setProgress(0);
+            try {
+                if (isPdf) {
+                    const result = await processPdfFile(f, item);
+                    rows.push(...result.rows);
+                    if (result.renamedDownload) renamedDownloads.push(result.renamedDownload);
+                } else if (isImage) {
+                    const result = await processImageFile(f, item);
+                    rows.push(...result.rows);
+                } else {
+                    updateQueueItem(item, "ignored", "tipo não suportado");
+                    log(`\nIgnorado: ${f.name} (tipo não suportado)`);
                 }
-
-                const bestPdfNF = pickBestCandidateNumber(nfCandidates, 4);
-                const renamedName = buildRenamedPdfName(bestPdfNF);
-                const pdfUrl = URL.createObjectURL(f);
-                renamedObjectUrls.push(pdfUrl);
-                renamedDownloads.push({ url: pdfUrl, name: renamedName });
-                log(`Download renomeado: ${renamedName}`);
-            } else if (isImage) {
-                log(`\nIMG: ${f.name}`);
-                const ocr = await ocrFromImageSmart(f);
-                let fields = extractFields(ocr.text, ocr.data);
-                fields = await refineNFWithCrop(fields, ocr);
-                rows.push(fields);
-
-                log(`OK: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
-                setProgress(0);
-            } else {
-                log(`\nIgnorado: ${f.name} (tipo não suportado)`);
+            } catch (e) {
+                updateQueueItem(item, "error", "falha no processamento");
+                log(`ERRO: ${f.name} -> ${e.message}`);
+            } finally {
+                completed += 1;
+                setProgress(Math.round((completed / files.length) * 100));
             }
-        } catch (e) {
-            log(`ERRO: ${f.name} -> ${e.message}`);
-            setProgress(0);
+        });
+
+        if (!rows.length) {
+            return log("\nNenhum registro válido gerado.");
         }
-    }
 
-    if (!rows.length) {
+        const csv = toCSV(rows);
+        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+
+        $download.href = url;
+        $download.download = "dacte_saida.csv";
+        $download.textContent = `Baixar CSV (${rows.length} linha(s))`;
+        $download.classList.remove("hidden");
+        renderRenamedLinks(renamedDownloads);
+
+        log("\nPronto. Fila concluída. Clique em “Baixar CSV” e/ou nos PDFs renomeados.");
+    } finally {
+        queueProgressMode = false;
         $run.disabled = false;
-        return log("\nNenhum registro válido gerado.");
     }
-
-    const csv = toCSV(rows);
-    const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-
-    $download.href = url;
-    $download.download = "dacte_saida.csv";
-    $download.textContent = `Baixar CSV (${rows.length} linha(s))`;
-    $download.classList.remove("hidden");
-    renderRenamedLinks(renamedDownloads);
-
-    $run.disabled = false;
-    log("\nPronto. Clique em “Baixar CSV” e/ou nos PDFs renomeados.");
 });
 async function preprocessToBlob(fileOrBlob, scale = 2.2) {
     const bmp = await createImageBitmap(fileOrBlob);
@@ -1204,7 +1336,7 @@ async function ocrFromImageSmart(fileOrBlob) {
     const { data } = await Tesseract.recognize(pre, "por", {
         logger: m => {
             if (m.status === "recognizing text" && typeof m.progress === "number") {
-                setProgress(Math.round(m.progress * 100));
+                setOcrProgress(Math.round(m.progress * 100));
             }
         }
     });
