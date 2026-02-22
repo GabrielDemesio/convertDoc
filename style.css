@@ -9,6 +9,17 @@ button:disabled { opacity: .5; cursor: not-allowed; }
 #renamed { margin-top: 12px; padding: 12px; border: 1px solid #e5e7ef; border-radius: 10px; background: #f9faff; }
 #renamed h2 { margin: 0 0 8px; font-size: 14px; }
 #renamed a { display: inline-block; margin: 4px 10px 4px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid #d7dbea; text-decoration: none; color: #111; background: #fff; }
+#queue { margin-top: 12px; padding: 12px; border: 1px solid #e5e7ef; border-radius: 10px; background: #fcfcff; }
+#queue h2 { margin: 0 0 8px; font-size: 14px; }
+#queue .queue-summary { font-size: 12px; color: #4b5563; margin-bottom: 8px; }
+#queue .queue-list { list-style: none; padding: 0; margin: 0; display: grid; gap: 6px; }
+#queue .queue-item { display: grid; grid-template-columns: 1fr auto; gap: 10px; align-items: center; border: 1px solid #ebedf5; background: #fff; border-radius: 8px; padding: 8px 10px; }
+#queue .queue-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+#queue .queue-state { font-size: 12px; padding: 3px 8px; border-radius: 999px; border: 1px solid #dbe1f0; background: #f8faff; color: #334155; }
+#queue .queue-item.processing .queue-state { border-color: #cbd5e1; background: #e2e8f0; color: #0f172a; }
+#queue .queue-item.done .queue-state { border-color: #86efac; background: #dcfce7; color: #14532d; }
+#queue .queue-item.error .queue-state { border-color: #fca5a5; background: #fee2e2; color: #7f1d1d; }
+#queue .queue-item.ignored .queue-state { border-color: #d1d5db; background: #f3f4f6; color: #374151; }
 pre { margin-top: 14px; background: #0b1020; color: #d5e2ff; padding: 12px; border-radius: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; }
 .progress { margin-top: 12px; height: 10px; border-radius: 999px; background: #eee; overflow: hidden; }
 #bar { height: 100%; width: 0%; background: #111; transition: width .15s linear; }
