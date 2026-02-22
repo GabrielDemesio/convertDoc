@@ -9,7 +9,7 @@
 <body>
 <main class="card">
     <h1>Upload → CSV</h1>
-    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF.</p>
+    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF e gera download do PDF renomeado com o valor da NF.</p>
 
     <input id="file" type="file" accept="application/pdf,image/jpeg,image/jpg,image/png" multiple />
 
@@ -17,6 +17,8 @@
         <button id="run">Processar</button>
         <a id="download" class="hidden">Baixar CSV</a>
     </div>
+
+    <div id="renamed" class="hidden"></div>
 
     <div class="progress">
         <div id="bar"></div>

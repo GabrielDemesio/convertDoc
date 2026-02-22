@@ -6,6 +6,9 @@ button { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; backgr
 button:disabled { opacity: .5; cursor: not-allowed; }
 #download { padding: 10px 14px; border-radius: 10px; border: 1px solid #ddd; text-decoration: none; }
 .hidden { display: none; }
+#renamed { margin-top: 12px; padding: 12px; border: 1px solid #e5e7ef; border-radius: 10px; background: #f9faff; }
+#renamed h2 { margin: 0 0 8px; font-size: 14px; }
+#renamed a { display: inline-block; margin: 4px 10px 4px 0; padding: 8px 10px; border-radius: 8px; border: 1px solid #d7dbea; text-decoration: none; color: #111; background: #fff; }
 pre { margin-top: 14px; background: #0b1020; color: #d5e2ff; padding: 12px; border-radius: 12px; overflow: auto; max-height: 320px; white-space: pre-wrap; }
 .progress { margin-top: 12px; height: 10px; border-radius: 999px; background: #eee; overflow: hidden; }
 #bar { height: 100%; width: 0%; background: #111; transition: width .15s linear; }

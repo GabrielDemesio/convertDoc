@@ -2,11 +2,20 @@ const $file = document.getElementById("file");
 const $run = document.getElementById("run");
 const $log = document.getElementById("log");
 const $download = document.getElementById("download");
+const $renamed = document.getElementById("renamed");
 const $bar = document.getElementById("bar");
+let renamedObjectUrls = [];
 
 function log(msg) { $log.textContent += msg + "\n"; }
 function clearLog() { $log.textContent = ""; }
 function setProgress(p) { $bar.style.width = `${Math.max(0, Math.min(100, p))}%`; }
+
+function sanitizeFilePart(v) {
+    return String(v || "")
+        .replace(/[<>:"/\\|?*\x00-\x1F]/g, " ")
+        .replace(/\s+/g, " ")
+        .trim();
+}
 
 function normalizeText(t) {
     return (t || "")
@@ -34,6 +43,93 @@ function normalizeDigits(s) {
     const n = String(s || "").replace(/\D+/g, "");
     if (!n) return "";
     return n.replace(/^0+/, "") || "0";
+}
+
+function extractNfFromDocOriginalText(text) {
+    const t = String(text || "");
+    const m1 = t.match(/\bNF[-\s]?E\b[\s\S]{0,120}?(\d{1,3})\s*[\/\\]\s*(\d{4,9})\b/i);
+    if (m1?.[2]) return normalizeDigits(m1[2]);
+
+    const m2 = t.match(/\bNF\b\s*[:\-]?\s*([0-9]{4,9})\s+\bVOL\b/i);
+    if (m2?.[1]) return normalizeDigits(m2[1]);
+
+    return "";
+}
+
+function extractNfFromSerieDocWords(words, pageWidth, pageHeight) {
+    if (!words.length || !pageWidth || !pageHeight) return "";
+    const cands = [];
+
+    for (const w of words) {
+        const raw = normalizeOcrNumber(String(w.text || ""));
+        const m = raw.match(/\b(\d{3})\s*[\/\\]\s*(\d{4,9})\b/);
+        if (!m?.[2]) continue;
+        // Faixa da tabela "DOCUMENTOS ORIGINÁRIOS" (evita canhoto e datas)
+        if (w.yc < pageHeight * 0.42 || w.yc > pageHeight * 0.80) continue;
+        if (w.xc < pageWidth * 0.05 || w.xc > pageWidth * 0.78) continue;
+        cands.push({ nf: normalizeDigits(m[2]), y: w.yc, x: w.x0 });
+    }
+
+    if (!cands.length) return "";
+    cands.sort((a, b) => a.y - b.y || a.x - b.x);
+    return cands[0].nf;
+}
+
+function extractNfFromNfBoxText(text) {
+    const t = String(text || "");
+    const m =
+        t.match(/\bNF[-\s]?E\b[\s\S]{0,100}?\bN[º°O]?\s*([0-9][0-9.\s]{3,10})\s*\bS[ÉE]RIE\b/i) ||
+        t.match(/\bN[º°O]\s*([0-9]{1,3}[.\s][0-9]{3,6})\b[\s\S]{0,40}\bS[ÉE]RIE\b/i);
+    return m?.[1] ? normalizeDigits(m[1]) : "";
+}
+
+function isOnlyConfusableDigitDiff(a, b) {
+    if (!a || !b || a.length !== b.length) return false;
+    const conf = new Set(["0", "6", "8"]);
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] === b[i]) continue;
+        if (!conf.has(a[i]) || !conf.has(b[i])) return false;
+    }
+    return true;
+}
+
+function pickConsistentNf(cands) {
+    const pool = cands.map(normalizeDigits).filter(Boolean);
+    if (!pool.length) return "";
+    if (pool.length === 1) return pool[0];
+
+    const freq = new Map();
+    for (const n of pool) freq.set(n, (freq.get(n) || 0) + 1);
+    let max = 0;
+    for (const v of freq.values()) if (v > max) max = v;
+    const top = [...freq.keys()].filter(k => freq.get(k) === max);
+    if (top.length === 1) return top[0];
+
+    const sameLen = top.every(v => v.length === top[0].length);
+    if (sameLen) {
+        let confusable = false;
+        for (let i = 0; i < top.length; i++) {
+            for (let j = i + 1; j < top.length; j++) {
+                if (isOnlyConfusableDigitDiff(top[i], top[j])) {
+                    confusable = true;
+                    break;
+                }
+            }
+            if (confusable) break;
+        }
+        if (confusable) {
+            top.sort((a, b) => {
+                const zerosA = (a.match(/0/g) || []).length;
+                const zerosB = (b.match(/0/g) || []).length;
+                if (zerosA !== zerosB) return zerosB - zerosA;
+                return Number(a) - Number(b);
+            });
+            return top[0];
+        }
+    }
+
+    top.sort((a, b) => a.length - b.length || Number(a) - Number(b));
+    return top[0];
 }
 
 function extractBestDigits(text, minLen = 4, maxLen = 9) {
@@ -376,18 +472,28 @@ function pickBestCandidateNumber(cands, minLen = 1) {
     if (!nums.length) return "";
     let pool = nums.filter(n => n.length >= minLen);
     if (!pool.length) pool = nums;
-    // prefer longest
-    let maxLen = Math.max(...pool.map(n => n.length));
-    const longest = pool.filter(n => n.length === maxLen);
-    // tie-break by frequency
+
+    // prefer most frequent across candidates
     const freq = new Map();
-    for (const n of longest) freq.set(n, (freq.get(n) || 0) + 1);
-    let best = longest[0];
+    for (const n of pool) freq.set(n, (freq.get(n) || 0) + 1);
     let bestCount = 0;
     for (const [k, v] of freq.entries()) {
-        if (v > bestCount) { bestCount = v; best = k; }
+        if (v > bestCount) bestCount = v;
     }
-    return best;
+    const top = [...freq.keys()].filter(n => freq.get(n) === bestCount);
+    if (top.length === 1) return top[0];
+
+    // OCR comum: um "1" grudado no início (ex: 120060 em vez de 20060)
+    for (const n of top) {
+        if (!n.startsWith("1") || n.length <= minLen) continue;
+        const tail = n.slice(1);
+        if (!tail || tail.length < minLen) continue;
+        if ((freq.get(tail) || 0) >= (freq.get(n) || 0)) return tail;
+    }
+
+    // empate: prefere o tamanho mais curto para reduzir ruído de dígito extra
+    top.sort((a, b) => a.length - b.length);
+    return top[0];
 }
 
 function stripAfterMarkers(text, markers) {
@@ -498,6 +604,79 @@ function findNumberInColumnBelow(words, anchorSpan, opts = {}) {
     return best ? normalizeOcrNumber(best) : "";
 }
 
+function extractNfFromFixedPosition(words, pageWidth, pageHeight) {
+    if (!words.length || !pageWidth || !pageHeight) return "";
+
+    // Região fixa do canhoto inferior onde costuma aparecer "NF: 20060"
+    const xMin = pageWidth * 0.30;
+    const xMax = pageWidth * 0.86;
+    const yMin = pageHeight * 0.86;
+    const yMax = pageHeight * 0.98;
+    const region = words
+        .filter(w =>
+            w.x0 >= xMin &&
+            w.x1 <= xMax &&
+            w.yc >= yMin &&
+            w.yc <= yMax
+        )
+        .sort((a, b) => (a.yc - b.yc) || (a.x0 - b.x0));
+    if (!region.length) return "";
+
+    // Prioridade: linha inferior com VOL (padrão "NF: 20060 VOL: 1")
+    const { lines: regionLines } = groupWordsIntoLines(region);
+    const linesDesc = [...regionLines].sort((a, b) => b.yc - a.yc);
+    for (const line of linesDesc) {
+        const volWord = line.words.find(w => normWord(w.text).startsWith("VOL"));
+        if (!volWord) continue;
+        const leftNums = line.words
+            .filter(w => w.x1 <= volWord.x0 + 2)
+            .map(w => ({
+                digits: extractNumberFromWord(w.text),
+                x1: w.x1
+            }))
+            .filter(c => c.digits.length >= 4 && c.digits.length <= 9)
+            .sort((a, b) => b.x1 - a.x1);
+        if (leftNums.length) return leftNums[0].digits;
+    }
+
+    // Caso OCR junte em um único token: "NF:20060"
+    for (const w of region) {
+        const raw = normalizeOcrNumber(String(w.text || ""));
+        const m = raw.match(/NF\s*[:\-]?\s*([0-9]{4,9})/i);
+        if (m?.[1]) return normalizeDigits(m[1]);
+    }
+
+    // Procura âncora "NF" mais baixa da região e pega o número à direita na mesma linha
+    const nfAnchors = region
+        .filter(w => {
+            const n = normWord(w.text);
+            return n === "NF" || n.startsWith("NF");
+        })
+        .sort((a, b) => b.yc - a.yc);
+
+    for (const a of nfAnchors) {
+        const yTol = Math.max(6, a.h * 0.9);
+        const sameLineRight = region
+            .filter(w =>
+                w.x0 >= a.x1 - 2 &&
+                Math.abs(w.yc - a.yc) <= yTol
+            )
+            .map(w => ({
+                digits: extractNumberFromWord(w.text),
+                dx: Math.max(0, w.x0 - a.x1)
+            }))
+            .filter(c => c.digits.length >= 4 && c.digits.length <= 9)
+            .sort((u, v) => u.dx - v.dx);
+
+        if (sameLineRight.length) return sameLineRight[0].digits;
+    }
+
+    // Fallback por texto da região
+    const regionText = region.map(w => w.text).join(" ");
+    const m = normalizeOcrNumber(regionText).match(/\bNF\b\s*[:\-]?\s*([0-9]{4,9})/i);
+    return m?.[1] ? normalizeDigits(m[1]) : "";
+}
+
 function extractNameByLabel(words, lines, lineGap, labelTokens, columnRange, labelSet, stopSet) {
     const anchor = findLabelAnchor(words, labelTokens);
     if (!anchor) return "";
@@ -521,6 +700,8 @@ function extractNameByLabel(words, lines, lineGap, labelTokens, columnRange, lab
 
 function extractFields(ocrText, ocrData = null) {
     const t = normalizeText(ocrText);
+    const nfFromDocText = extractNfFromDocOriginalText(t);
+    const nfFromBoxText = extractNfFromNfBoxText(t);
     const words = Array.isArray(ocrData?.words) ? ocrData.words.map(w => ({
         text: w.text || "",
         x0: w.bbox.x0,
@@ -535,6 +716,7 @@ function extractFields(ocrText, ocrData = null) {
     const { lines, lineGap } = groupWordsIntoLines(words);
     const maxX = words.length ? Math.max(...words.map(w => w.x1)) : 0;
     const maxY = words.length ? Math.max(...words.map(w => w.y1)) : 0;
+    const nfFromSerieDocWords = extractNfFromSerieDocWords(words, maxX, maxY);
     const labelSet = new Set([
         "REM","REMETENTE","DEST","DESTINATARIO","DESTINATÁRIO","CONSIGNATARIO","CONSIGNATÁRIO",
         "CEP","VOLUMES","VOLUME","VOL","PESO","REAL","CTE","CT","NF","NFE","EXPEDIDOR","RECEBEDOR","TOMADOR"
@@ -578,8 +760,8 @@ function extractFields(ocrText, ocrData = null) {
         pick(/\bCTE\b\s*[:\-]?\s*(\d{4,})/i, t) ||
         pick(/\[(\d{6})\]/, t);
 
-    let nfByWords = "";
-    if (words.length) {
+    let nfByWords = words.length ? extractNfFromFixedPosition(words, maxX, maxY) : "";
+    if (words.length && !nfByWords) {
         const nfSpan = findLabelSpan(words, ["NFE"]) || findLabelSpan(words, ["NF"]);
         if (nfSpan) {
             const li = findLineIndexByY(lines, nfSpan.yc, lineGap);
@@ -650,12 +832,51 @@ function extractFields(ocrText, ocrData = null) {
             nfByWords = pickBestCandidateNumber(cands, 4);
         }
     }
-    const nfRaw =
-        nfByWords ||
+    const nfByText =
         pickNumberAfterLabel(t, ["NF-E", "NFE", "NF", "NOTA", "FISCAL", "Nº", "N°", "NO", "N."], 4) ||
         pick(/\bNF(?:-?e)?\b\s*[:\-]?\s*([\d.\s]{4,})/i, t) ||
         pick(/\bNFE\b\s*[:\-]?\s*([\d.\s]{4,})/i, t);
-    const nf = normalizeDigits(nfRaw);
+    const nfFromWords = normalizeDigits(nfByWords);
+    const nfFromDoc = normalizeDigits(nfFromDocText);
+    const nfFromBox = normalizeDigits(nfFromBoxText);
+    const nfFromSerie = normalizeDigits(nfFromSerieDocWords);
+    const nfFromText = normalizeDigits(nfByText);
+    let nf = pickConsistentNf([nfFromSerie, nfFromBox, nfFromDoc, nfFromWords, nfFromText]);
+
+    if (!nfFromSerie && !nfFromBox && !nfFromDoc && nfFromWords && nfFromText && nfFromWords !== nfFromText) {
+        const wordHasExtraLeadingOne =
+            nfFromWords.length === nfFromText.length + 1 &&
+            nfFromWords.startsWith("1") &&
+            nfFromWords.endsWith(nfFromText);
+        const textHasExtraLeadingOne =
+            nfFromText.length === nfFromWords.length + 1 &&
+            nfFromText.startsWith("1") &&
+            nfFromText.endsWith(nfFromWords);
+
+        if (wordHasExtraLeadingOne) {
+            nf = nfFromText;
+        } else if (textHasExtraLeadingOne) {
+            nf = nfFromWords;
+        } else {
+            nf = pickBestCandidateNumber([nfFromWords, nfFromText], 4) || nf;
+        }
+    }
+
+    // Evita confundir NF com CT-e quando OCR aproxima os campos.
+    const cteDigits = normalizeDigits(cte);
+    if (nf && cteDigits && nf === cteDigits) {
+        if (nfFromSerie && nfFromSerie !== cteDigits) {
+            nf = nfFromSerie;
+        } else if (nfFromBox && nfFromBox !== cteDigits) {
+            nf = nfFromBox;
+        } else if (nfFromDoc && nfFromDoc !== cteDigits) {
+            nf = nfFromDoc;
+        } else if (nfFromText && nfFromText !== cteDigits) {
+            nf = nfFromText;
+        } else if (nfFromWords && nfFromWords !== cteDigits) {
+            nf = nfFromWords;
+        }
+    }
 
     let rem = extractNameByLabel(words, lines, lineGap, ["REMETENTE", "REM"], leftCol, labelSet, stopSet);
     if (!rem) {
@@ -837,10 +1058,40 @@ function dataUrlToBlob(dataUrl) {
     return new Blob([arr], { type: mime });
 }
 
+function buildRenamedPdfName(nfDigits) {
+    const nf = normalizeDigits(nfDigits);
+    if (!nf) return "NF_NAO_ENCONTRADA.pdf";
+    return `${nf}.pdf`;
+}
+
+function clearRenamedLinks() {
+    for (const u of renamedObjectUrls) URL.revokeObjectURL(u);
+    renamedObjectUrls = [];
+    $renamed.innerHTML = "";
+    $renamed.classList.add("hidden");
+}
+
+function renderRenamedLinks(downloads) {
+    if (!downloads.length) return;
+    const title = document.createElement("h2");
+    title.textContent = "PDFs renomeados";
+    $renamed.appendChild(title);
+
+    for (const d of downloads) {
+        const a = document.createElement("a");
+        a.href = d.url;
+        a.download = d.name;
+        a.textContent = `Baixar ${d.name}`;
+        $renamed.appendChild(a);
+    }
+    $renamed.classList.remove("hidden");
+}
+
 $run.addEventListener("click", async () => {
     clearLog();
     setProgress(0);
     $download.classList.add("hidden");
+    clearRenamedLinks();
 
     const files = [...($file.files || [])];
     if (!files.length) return log("Selecione PDFs e/ou imagens (JPEG/PNG).");
@@ -848,6 +1099,7 @@ $run.addEventListener("click", async () => {
     $run.disabled = true;
 
     const rows = [];
+    const renamedDownloads = [];
 
     for (const f of files) {
         const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
@@ -857,6 +1109,7 @@ $run.addEventListener("click", async () => {
             if (isPdf) {
                 log(`\nPDF: ${f.name}`);
                 const pageImages = await pdfToPageImages(f);
+                const nfCandidates = [];
 
                 // Faz OCR em cada página e extrai 1 linha por página
                 for (let i = 0; i < pageImages.length; i++) {
@@ -866,10 +1119,18 @@ $run.addEventListener("click", async () => {
                     let fields = extractFields(ocr.text, ocr.data);
                     fields = await refineNFWithCrop(fields, ocr);
                     rows.push(fields);
+                    if (fields.NF) nfCandidates.push(fields.NF);
 
                     log(`OK pág ${i + 1}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
                     setProgress(0);
                 }
+
+                const bestPdfNF = pickBestCandidateNumber(nfCandidates, 4);
+                const renamedName = buildRenamedPdfName(bestPdfNF);
+                const pdfUrl = URL.createObjectURL(f);
+                renamedObjectUrls.push(pdfUrl);
+                renamedDownloads.push({ url: pdfUrl, name: renamedName });
+                log(`Download renomeado: ${renamedName}`);
             } else if (isImage) {
                 log(`\nIMG: ${f.name}`);
                 const ocr = await ocrFromImageSmart(f);
@@ -901,9 +1162,10 @@ $run.addEventListener("click", async () => {
     $download.download = "dacte_saida.csv";
     $download.textContent = `Baixar CSV (${rows.length} linha(s))`;
     $download.classList.remove("hidden");
+    renderRenamedLinks(renamedDownloads);
 
     $run.disabled = false;
-    log("\nPronto. Clique em “Baixar CSV”.");
+    log("\nPronto. Clique em “Baixar CSV” e/ou nos PDFs renomeados.");
 });
 async function preprocessToBlob(fileOrBlob, scale = 2.2) {
     const bmp = await createImageBitmap(fileOrBlob);
