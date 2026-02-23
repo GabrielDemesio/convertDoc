@@ -4,30 +4,51 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>DACTE (PDF/JPEG) → CSV/XML</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500&display=swap" rel="stylesheet">
     <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-<main class="card">
-    <h1>Upload → CSV/XML</h1>
-    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF e gera CSV, XML estruturado e download do PDF renomeado com o valor da NF.</p>
+<main class="app-shell">
+    <header class="hero">
+        <h1>Upload → CSV/XML</h1>
+        <p>Extrai REM, DEST, CEP, VOLUMES, PESO REAL, CT-e e NF, gera XML estruturado e renomeia PDFs com base na NF encontrada.</p>
+    </header>
 
-    <input id="file" type="file" accept="application/pdf,image/jpeg,image/jpg,image/png" multiple />
+    <section class="panel">
+        <label class="field-label" for="file">Arquivos para processar</label>
+        <input id="file" type="file" accept="application/pdf,image/jpeg,image/jpg,image/png" multiple />
+        <div class="field-help">Suporta PDF, JPEG e PNG. O parse nativo do PDF é priorizado para capturar a NF com mais precisão. Processamento em lotes automáticos de até 50 arquivos.</div>
 
-    <div class="row">
-        <button id="run">Processar</button>
-        <a id="download" class="hidden">Baixar CSV</a>
-        <a id="downloadXml" class="hidden">Baixar XML</a>
-        <button id="downloadAll" class="hidden" type="button">Baixar PDFs em massa (ZIP)</button>
-    </div>
+        <div class="row actions">
+            <button id="run">Processar</button>
+            <a id="download" class="hidden">Baixar CSV</a>
+            <a id="downloadXml" class="hidden">Baixar XML</a>
+            <button id="downloadAll" class="hidden" type="button">Baixar PDFs em massa (ZIP)</button>
+        </div>
+    </section>
 
-    <div id="renamed" class="hidden"></div>
-    <div id="queue" class="hidden"></div>
+    <section class="panel">
+        <div class="status-head">
+            <div id="statusText" class="status-chip idle">Aguardando arquivos</div>
+            <div id="progressText" class="progress-text">0%</div>
+        </div>
+        <div class="progress">
+            <div id="bar"></div>
+        </div>
 
-    <div class="progress">
-        <div id="bar"></div>
-    </div>
+        <div id="queue" class="hidden"></div>
+        <div id="renamed" class="hidden"></div>
+    </section>
 
-    <pre id="log"></pre>
+    <section class="panel">
+        <div class="log-head">
+            <h2>Logs de processamento</h2>
+            <button id="clearLog" type="button">Limpar logs</button>
+        </div>
+        <div id="log" class="log-stream"></div>
+    </section>
 </main>
 
 <!-- PDF.js (legacy build exposes global pdfjsLib) -->

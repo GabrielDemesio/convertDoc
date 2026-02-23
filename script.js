@@ -1,9 +1,12 @@
 const $file = document.getElementById("file");
 const $run = document.getElementById("run");
 const $log = document.getElementById("log");
+const $clearLog = document.getElementById("clearLog");
 const $download = document.getElementById("download");
 const $downloadXml = document.getElementById("downloadXml");
 const $downloadAll = document.getElementById("downloadAll");
+const $statusText = document.getElementById("statusText");
+const $progressText = document.getElementById("progressText");
 const $renamed = document.getElementById("renamed");
 const $queue = document.getElementById("queue");
 const $bar = document.getElementById("bar");
@@ -12,15 +15,100 @@ let renamedDownloadsState = [];
 let csvObjectUrl = null;
 let xmlObjectUrl = null;
 const FILE_CONCURRENCY = 2;
+const AUTO_BATCH_SIZE = 50;
+const MAX_LOG_LINES = 700;
 let queueItemsState = [];
 let queueProgressMode = false;
 
-function log(msg) { $log.textContent += msg + "\n"; }
-function clearLog() { $log.textContent = ""; }
-function setProgress(p) { $bar.style.width = `${Math.max(0, Math.min(100, p))}%`; }
+function nowTimeLabel() {
+    return new Date().toLocaleTimeString("pt-BR", { hour12: false });
+}
+
+function detectLogLevel(message, level = "info") {
+    if (level !== "info") return level;
+    const msg = String(message || "").toUpperCase();
+    if (msg.includes("ERRO")) return "error";
+    if (msg.includes("FALHOU") || msg.includes("FALLBACK")) return "warn";
+    if (msg.startsWith("OK") || msg.includes("PRONTO") || msg.includes("CONCLUÍDA") || msg.includes("ZIP GERADO")) return "success";
+    return "info";
+}
+
+function renderLogLine(message, level = "info") {
+    if (!$log) return;
+    const effectiveLevel = detectLogLevel(message, level);
+    const empty = $log.querySelector(".log-empty");
+    if (empty) empty.remove();
+
+    const line = document.createElement("div");
+    line.className = "log-line";
+
+    const ts = document.createElement("span");
+    ts.className = "log-time";
+    ts.textContent = nowTimeLabel();
+
+    const lvl = document.createElement("span");
+    lvl.className = `log-level ${effectiveLevel}`;
+    lvl.textContent = effectiveLevel.toUpperCase();
+
+    const txt = document.createElement("span");
+    txt.className = "log-text";
+    txt.textContent = message;
+
+    line.appendChild(ts);
+    line.appendChild(lvl);
+    line.appendChild(txt);
+    $log.appendChild(line);
+
+    while ($log.childElementCount > MAX_LOG_LINES) {
+        $log.removeChild($log.firstElementChild);
+    }
+    $log.scrollTop = $log.scrollHeight;
+}
+
+function log(msg, level = "info") {
+    const rows = String(msg ?? "")
+        .replace(/\r/g, "")
+        .split("\n")
+        .map(s => s.trim())
+        .filter(Boolean);
+    if (!rows.length) return;
+    for (const row of rows) renderLogLine(row, level);
+}
+
+function clearLog() {
+    if (!$log) return;
+    $log.innerHTML = "";
+    const hint = document.createElement("div");
+    hint.className = "log-empty";
+    hint.textContent = "Logs aparecerão aqui durante o processamento.";
+    $log.appendChild(hint);
+}
+
+function setStatus(text, tone = "idle") {
+    if (!$statusText) return;
+    $statusText.className = `status-chip ${tone}`;
+    $statusText.textContent = text;
+}
+
+function setProgress(p) {
+    const pct = Math.max(0, Math.min(100, p));
+    $bar.style.width = `${pct}%`;
+    if ($progressText) $progressText.textContent = `${pct}%`;
+}
+
 function setOcrProgress(p) {
     if (queueProgressMode) return;
+    setStatus("Executando OCR...", "running");
     setProgress(p);
+}
+
+function chunkArray(list, size) {
+    const safeSize = Math.max(1, Number(size) || 1);
+    const chunks = [];
+    for (let i = 0; i < list.length; i += safeSize) {
+        chunks.push(list.slice(i, i + safeSize));
+    }
+    return chunks;
 }
 
 function sanitizeFilePart(v) {
@@ -1010,7 +1098,15 @@ function extractFields(ocrText, ocrData = null) {
 const OUTPUT_HEADERS = ["REM","DEST","CEP","VOLUMES","PESO REAL","CT-e","NF"];
 
 function toCSV(rows) {
-    const headers = OUTPUT_HEADERS;
+    const columns = [
+        { label: "REM", key: "REM" },
+        { label: "DEST", key: "DEST" },
+        { label: "CEP", key: "CEP" },
+        { label: "VOLUMES", key: "VOLUMES" },
+        { label: "PESO REAL", key: "PESO REAL" },
+        { label: "Ct-e", key: "CT-e" },
+        { label: "NF", key: "NF" }
+    ];
     const sep = ";";
     const clean = (v) =>
         String(v ?? "")
@@ -1019,13 +1115,10 @@ function toCSV(rows) {
             .trim();
     const esc = (v) => `"${clean(v).replace(/"/g, '""')}"`;
 
-    const lines = [];
-    rows.forEach((r, idx) => {
-        headers.forEach((h) => {
-            lines.push([`"${h}"`, esc(r[h])].join(sep));
-        });
-        if (idx < rows.length - 1) lines.push("");
-    });
+    const lines = [columns.map(c => `"${c.label}"`).join(sep)];
+    for (const row of rows) {
+        lines.push(columns.map(c => esc(row?.[c.key] ?? "")).join(sep));
+    }
     return lines.join("\n");
 }
 
@@ -1441,6 +1534,11 @@ function updateQueueItem(item, status, detail = "") {
     item.detail = detail;
     if (item.el) item.el.className = `queue-item ${status}`;
     if (item.stateEl) item.stateEl.textContent = queueLabel(status, detail);
+    if (status === "processing") {
+        setStatus(`Processando: ${item.name}${detail ? ` • ${detail}` : ""}`, "running");
+    } else if (status === "error") {
+        setStatus(`Erro no arquivo: ${item.name}`, "error");
+    }
     updateQueueSummary();
 }
 
@@ -1599,17 +1697,20 @@ async function processImageFile(file, item) {
 if ($downloadAll) {
     $downloadAll.addEventListener("click", async () => {
         if (!renamedDownloadsState.length) {
-            log("Nenhum PDF renomeado para download em massa.");
+            log("Nenhum PDF renomeado para download em massa.", "warn");
             return;
         }
         const originalLabel = $downloadAll.textContent;
         $downloadAll.disabled = true;
         $downloadAll.textContent = "Gerando ZIP...";
+        setStatus("Gerando ZIP de PDFs renomeados...", "running");
         try {
             await downloadRenamedZip(renamedDownloadsState);
-            log(`ZIP gerado com ${renamedDownloadsState.length} PDF(s) renomeado(s).`);
+            log(`ZIP gerado com ${renamedDownloadsState.length} PDF(s) renomeado(s).`, "success");
+            setStatus("ZIP gerado com sucesso.", "success");
         } catch (e) {
-            log(`ERRO ZIP: ${e.message}`);
+            log(`ERRO ZIP: ${e.message}`, "error");
+            setStatus("Falha ao gerar ZIP.", "error");
         } finally {
             $downloadAll.disabled = false;
             $downloadAll.textContent = originalLabel;
@@ -1617,16 +1718,31 @@ if ($downloadAll) {
     });
 }
 
+if ($clearLog) {
+    $clearLog.addEventListener("click", () => {
+        clearLog();
+        setStatus("Logs limpos. Aguardando processamento...", "idle");
+    });
+}
+
+clearLog();
+setStatus("Aguardando arquivos", "idle");
+setProgress(0);
+
 $run.addEventListener("click", async () => {
     clearLog();
     setProgress(0);
+    setStatus("Preparando fila...", "running");
     clearOutputDownloads();
     clearRenamedLinks();
     $queue.classList.add("hidden");
     $queue.innerHTML = "";
 
     const files = [...($file.files || [])];
-    if (!files.length) return log("Selecione PDFs e/ou imagens (JPEG/PNG).");
+    if (!files.length) {
+        setStatus("Selecione ao menos um arquivo para iniciar.", "warn");
+        return log("Selecione PDFs e/ou imagens (JPEG/PNG).", "warn");
+    }
 
     $run.disabled = true;
     queueProgressMode = true;
@@ -1637,9 +1753,15 @@ $run.addEventListener("click", async () => {
         const renamedDownloads = [];
 
         const queueItems = renderQueue(files);
+        const batches = chunkArray(queueItems, AUTO_BATCH_SIZE);
         let completed = 0;
+        log(`Fila iniciada com ${files.length} arquivo(s).`, "info");
+        log(
+            `Processamento em lotes automáticos: ${batches.length} lote(s), até ${AUTO_BATCH_SIZE} arquivo(s) por lote.`,
+            "info"
+        );
 
-        await runQueue(queueItems, FILE_CONCURRENCY, async (item) => {
+        const processQueueItem = async (item) => {
             const f = item.file;
             const isPdf = f.type === "application/pdf" || f.name.toLowerCase().endsWith(".pdf");
             const isImage = f.type.startsWith("image/");
@@ -1656,19 +1778,32 @@ $run.addEventListener("click", async () => {
                     if (result.xmlDocument) xmlDocuments.push(result.xmlDocument);
                 } else {
                     updateQueueItem(item, "ignored", "tipo não suportado");
-                    log(`\nIgnorado: ${f.name} (tipo não suportado)`);
+                    log(`Ignorado: ${f.name} (tipo não suportado)`, "warn");
                 }
             } catch (e) {
                 updateQueueItem(item, "error", "falha no processamento");
-                log(`ERRO: ${f.name} -> ${e.message}`);
+                log(`ERRO: ${f.name} -> ${e.message}`, "error");
             } finally {
                 completed += 1;
                 setProgress(Math.round((completed / files.length) * 100));
             }
-        });
+        };
+
+        for (let i = 0; i < batches.length; i++) {
+            const batch = batches[i];
+            const batchNum = i + 1;
+            setStatus(`Processando lote ${batchNum}/${batches.length}...`, "running");
+            log(`Iniciando lote ${batchNum}/${batches.length} com ${batch.length} arquivo(s).`, "info");
+            await runQueue(batch, FILE_CONCURRENCY, processQueueItem);
+            log(`Lote ${batchNum}/${batches.length} concluído.`, "success");
+            if (i < batches.length - 1) {
+                await new Promise(res => setTimeout(res, 20));
+            }
+        }
 
         if (!rows.length) {
-            return log("\nNenhum registro válido gerado.");
+            setStatus("Concluído sem registros válidos.", "warn");
+            return log("Nenhum registro válido gerado.", "warn");
         }
 
         const csv = toCSV(rows);
@@ -1692,7 +1827,11 @@ $run.addEventListener("click", async () => {
 
         renderRenamedLinks(renamedDownloads);
 
-        log("\nPronto. Fila concluída. Clique em “Baixar CSV”, “Baixar XML”, “Baixar PDFs em massa (ZIP)” e/ou nos PDFs renomeados.");
+        setStatus(`Concluído: ${rows.length} registro(s) processado(s).`, "success");
+        log("Pronto. Fila concluída. Clique em “Baixar CSV”, “Baixar XML”, “Baixar PDFs em massa (ZIP)” e/ou nos PDFs renomeados.", "success");
+    } catch (e) {
+        setStatus("Falha geral no processamento.", "error");
+        log(`ERRO GERAL: ${e.message}`, "error");
     } finally {
         queueProgressMode = false;
         $run.disabled = false;
