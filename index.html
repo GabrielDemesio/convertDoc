@@ -3,19 +3,21 @@
 <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>DACTE (PDF/JPEG) → CSV</title>
+    <title>DACTE (PDF/JPEG) → CSV/XML</title>
     <link rel="stylesheet" href="style.css" />
 </head>
 <body>
 <main class="card">
-    <h1>Upload → CSV</h1>
-    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF e gera download do PDF renomeado com o valor da NF.</p>
+    <h1>Upload → CSV/XML</h1>
+    <p>Extrai: REM, DEST, CEP, VOLUMES, PESO REAL, CT-e, NF e gera CSV, XML estruturado e download do PDF renomeado com o valor da NF.</p>
 
     <input id="file" type="file" accept="application/pdf,image/jpeg,image/jpg,image/png" multiple />
 
     <div class="row">
         <button id="run">Processar</button>
         <a id="download" class="hidden">Baixar CSV</a>
+        <a id="downloadXml" class="hidden">Baixar XML</a>
+        <button id="downloadAll" class="hidden" type="button">Baixar PDFs em massa (ZIP)</button>
     </div>
 
     <div id="renamed" class="hidden"></div>
@@ -40,6 +42,7 @@
 
 <!-- Tesseract.js -->
 <script src="https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
 
 <script src="script.js"></script>
 </body>

@@ -2,10 +2,15 @@ const $file = document.getElementById("file");
 const $run = document.getElementById("run");
 const $log = document.getElementById("log");
 const $download = document.getElementById("download");
+const $downloadXml = document.getElementById("downloadXml");
+const $downloadAll = document.getElementById("downloadAll");
 const $renamed = document.getElementById("renamed");
 const $queue = document.getElementById("queue");
 const $bar = document.getElementById("bar");
 let renamedObjectUrls = [];
+let renamedDownloadsState = [];
+let csvObjectUrl = null;
+let xmlObjectUrl = null;
 const FILE_CONCURRENCY = 2;
 let queueItemsState = [];
 let queueProgressMode = false;
@@ -706,20 +711,27 @@ function extractNameByLabel(words, lines, lineGap, labelTokens, columnRange, lab
     return "";
 }
 
+function mapOcrWords(ocrData) {
+    if (!Array.isArray(ocrData?.words)) return [];
+    return ocrData.words
+        .filter(w => w?.bbox)
+        .map(w => ({
+            text: w.text || "",
+            x0: Number(w.bbox.x0) || 0,
+            y0: Number(w.bbox.y0) || 0,
+            x1: Number(w.bbox.x1) || 0,
+            y1: Number(w.bbox.y1) || 0,
+            xc: ((Number(w.bbox.x0) || 0) + (Number(w.bbox.x1) || 0)) / 2,
+            yc: ((Number(w.bbox.y0) || 0) + (Number(w.bbox.y1) || 0)) / 2,
+            h: (Number(w.bbox.y1) || 0) - (Number(w.bbox.y0) || 0)
+        }));
+}
+
 function extractFields(ocrText, ocrData = null) {
     const t = normalizeText(ocrText);
     const nfFromDocText = extractNfFromDocOriginalText(t);
     const nfFromBoxText = extractNfFromNfBoxText(t);
-    const words = Array.isArray(ocrData?.words) ? ocrData.words.map(w => ({
-        text: w.text || "",
-        x0: w.bbox.x0,
-        y0: w.bbox.y0,
-        x1: w.bbox.x1,
-        y1: w.bbox.y1,
-        xc: (w.bbox.x0 + w.bbox.x1) / 2,
-        yc: (w.bbox.y0 + w.bbox.y1) / 2,
-        h: (w.bbox.y1 - w.bbox.y0)
-    })) : [];
+    const words = mapOcrWords(ocrData);
 
     const { lines, lineGap } = groupWordsIntoLines(words);
     const maxX = words.length ? Math.max(...words.map(w => w.x1)) : 0;
@@ -995,8 +1007,10 @@ function extractFields(ocrText, ocrData = null) {
     };
 }
 
+const OUTPUT_HEADERS = ["REM","DEST","CEP","VOLUMES","PESO REAL","CT-e","NF"];
+
 function toCSV(rows) {
-    const headers = ["REM","DEST","CEP","VOLUMES","PESO REAL","CT-e","NF"];
+    const headers = OUTPUT_HEADERS;
     const sep = ";";
     const clean = (v) =>
         String(v ?? "")
@@ -1005,16 +1019,144 @@ function toCSV(rows) {
             .trim();
     const esc = (v) => `"${clean(v).replace(/"/g, '""')}"`;
 
-    // Formato vertical: uma linha por campo (coluna A = campo, coluna B = valor)
     const lines = [];
     rows.forEach((r, idx) => {
         headers.forEach((h) => {
             lines.push([`"${h}"`, esc(r[h])].join(sep));
         });
-        // separador entre registros (linha em branco), se houver mais de um
         if (idx < rows.length - 1) lines.push("");
     });
     return lines.join("\n");
+}
+
+function clearOutputDownloads() {
+    if (csvObjectUrl) URL.revokeObjectURL(csvObjectUrl);
+    if (xmlObjectUrl) URL.revokeObjectURL(xmlObjectUrl);
+    csvObjectUrl = null;
+    xmlObjectUrl = null;
+    $download.removeAttribute("href");
+    $download.classList.add("hidden");
+    if ($downloadXml) {
+        $downloadXml.removeAttribute("href");
+        $downloadXml.classList.add("hidden");
+    }
+}
+
+function escapeXml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&apos;");
+}
+
+function xmlAttr(name, value) {
+    if (value === undefined || value === null || value === "") return "";
+    return ` ${name}="${escapeXml(value)}"`;
+}
+
+function fmtXmlNumber(value) {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return "";
+    return n.toFixed(2);
+}
+
+function buildPageXmlSnapshot(pageNumber, fields, ocr, source = "ocr") {
+    const words = mapOcrWords(ocr?.data);
+    const { lines } = groupWordsIntoLines(words);
+    return {
+        pageNumber,
+        width: Number(ocr?.width) || 0,
+        height: Number(ocr?.height) || 0,
+        source,
+        text: normalizeText(ocr?.text || ""),
+        fields: { ...fields },
+        lines: lines.map((line, lineIndex) => ({
+            index: lineIndex + 1,
+            y: line.yc,
+            text: cleanField(line.words.map(w => w.text).join(" ")),
+            words: line.words.map((w, tokenIndex) => ({
+                index: tokenIndex + 1,
+                text: w.text || "",
+                x0: w.x0,
+                y0: w.y0,
+                x1: w.x1,
+                y1: w.y1
+            }))
+        }))
+    };
+}
+
+function toDocLikeXml(documents) {
+    const lines = [];
+    lines.push('<?xml version="1.0" encoding="UTF-8"?>');
+    lines.push(`<doclingLikeExport generatedAt="${escapeXml(new Date().toISOString())}">`);
+
+    for (const doc of documents) {
+        lines.push(
+            `  <document${xmlAttr("fileName", doc.fileName)}${xmlAttr("sourceType", doc.sourceType)}${xmlAttr("pageCount", doc.pages?.length || 0)}>`
+        );
+
+        for (const page of (doc.pages || [])) {
+            lines.push(
+                `    <page${xmlAttr("number", page.pageNumber)}${xmlAttr("source", page.source)}${xmlAttr("width", fmtXmlNumber(page.width))}${xmlAttr("height", fmtXmlNumber(page.height))}>`
+            );
+
+            lines.push("      <fields>");
+            for (const field of OUTPUT_HEADERS) {
+                lines.push(`        <field name="${escapeXml(field)}">${escapeXml(page.fields?.[field] || "")}</field>`);
+            }
+            lines.push("      </fields>");
+
+            lines.push(`      <text>${escapeXml(page.text || "")}</text>`);
+            lines.push("      <layout>");
+            for (const line of (page.lines || [])) {
+                lines.push(`        <line${xmlAttr("index", line.index)}${xmlAttr("y", fmtXmlNumber(line.y))}>`);
+                lines.push(`          <lineText>${escapeXml(line.text || "")}</lineText>`);
+                for (const token of (line.words || [])) {
+                    lines.push(
+                        `          <token${xmlAttr("index", token.index)}${xmlAttr("x0", fmtXmlNumber(token.x0))}${xmlAttr("y0", fmtXmlNumber(token.y0))}${xmlAttr("x1", fmtXmlNumber(token.x1))}${xmlAttr("y1", fmtXmlNumber(token.y1))}>${escapeXml(token.text || "")}</token>`
+                    );
+                }
+                lines.push("        </line>");
+            }
+            lines.push("      </layout>");
+
+            lines.push("    </page>");
+        }
+
+        lines.push("  </document>");
+    }
+
+    lines.push("</doclingLikeExport>");
+    return lines.join("\n");
+}
+
+function isEmptyField(v) {
+    return !cleanField(String(v || ""));
+}
+
+function mergeFieldsPreferPrimary(primary, secondary) {
+    const out = { ...primary };
+    for (const key of OUTPUT_HEADERS) {
+        if (isEmptyField(out[key]) && !isEmptyField(secondary?.[key])) {
+            out[key] = secondary[key];
+        }
+    }
+    return out;
+}
+
+function makeExtractWordsFromLayoutWords(words) {
+    return words.map(w => ({
+        text: w.text || "",
+        bbox: {
+            x0: w.x0,
+            y0: w.y0,
+            x1: w.x1,
+            y1: w.y1
+        }
+    }));
 }
 
 async function ocrFromImageBlob(blob, label = "") {
@@ -1030,6 +1172,12 @@ async function ocrFromImageBlob(blob, label = "") {
 
 // Renderiza PDF para imagens (dataURL) com PDF.js
 async function pdfToPageImages(file) {
+    const out = await pdfToPageImagesByNumbers(file);
+    return out.images.map(p => p.dataUrl);
+}
+
+// Renderiza somente páginas selecionadas (ou todas, se omitido)
+async function pdfToPageImagesByNumbers(file, pageNumbers = null) {
     if (!window.pdfjsLib) {
         throw new Error("PDF.js não carregou. Verifique conexão ou o link do PDF.js no HTML.");
     }
@@ -1037,7 +1185,11 @@ async function pdfToPageImages(file) {
     const pdf = await window.pdfjsLib.getDocument({ data: ab }).promise;
 
     const images = [];
-    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+    const targetPages = Array.isArray(pageNumbers) && pageNumbers.length
+        ? [...new Set(pageNumbers)].filter(n => n >= 1 && n <= pdf.numPages).sort((a, b) => a - b)
+        : Array.from({ length: pdf.numPages }, (_, i) => i + 1);
+
+    for (const pageNum of targetPages) {
         log(`Render PDF página ${pageNum}/${pdf.numPages}...`);
         const page = await pdf.getPage(pageNum);
 
@@ -1052,9 +1204,76 @@ async function pdfToPageImages(file) {
         await page.render({ canvasContext: ctx, viewport }).promise;
 
         const dataUrl = canvas.toDataURL("image/jpeg", 0.95);
-        images.push(dataUrl);
+        images.push({ pageNumber: pageNum, dataUrl });
     }
-    return images;
+    return { images, totalPages: pdf.numPages };
+}
+
+async function pdfToNativeXmlPages(file) {
+    if (!window.pdfjsLib) {
+        throw new Error("PDF.js não carregou para extração nativa.");
+    }
+    const ab = await file.arrayBuffer();
+    const pdf = await window.pdfjsLib.getDocument({ data: ab }).promise;
+    const pages = [];
+
+    for (let pageNum = 1; pageNum <= pdf.numPages; pageNum++) {
+        const page = await pdf.getPage(pageNum);
+        const viewport = page.getViewport({ scale: 1 });
+        const textContent = await page.getTextContent();
+        const words = [];
+
+        for (const item of (textContent.items || [])) {
+            const text = String(item.str || "").trim();
+            if (!text) continue;
+
+            const x = Number(item.transform?.[4]) || 0;
+            const yPdf = Number(item.transform?.[5]) || 0;
+            const w = Math.max(Number(item.width) || 0, text.length * 3);
+            const h = Math.max(Number(item.height) || 0, 1);
+            const yBottom = viewport.height - yPdf;
+            const yTop = yBottom - h;
+
+            words.push({
+                text,
+                x0: x,
+                y0: yTop,
+                x1: x + w,
+                y1: yBottom,
+                xc: x + w / 2,
+                yc: yTop + h / 2,
+                h
+            });
+        }
+
+        const { lines } = groupWordsIntoLines(words);
+        const pageText = lines.map(l => cleanField(l.words.map(w => w.text).join(" "))).filter(Boolean).join("\n");
+        const extractWords = makeExtractWordsFromLayoutWords(words);
+        const fields = pageText ? extractFields(pageText, { words: extractWords }) : {};
+        pages.push({
+            pageNumber: pageNum,
+            width: viewport.width,
+            height: viewport.height,
+            source: "pdf-text",
+            text: pageText,
+            fields,
+            lines: lines.map((line, lineIndex) => ({
+                index: lineIndex + 1,
+                y: line.yc,
+                text: cleanField(line.words.map(w => w.text).join(" ")),
+                words: line.words.map((w, tokenIndex) => ({
+                    index: tokenIndex + 1,
+                    text: w.text || "",
+                    x0: w.x0,
+                    y0: w.y0,
+                    x1: w.x1,
+                    y1: w.y1
+                }))
+            }))
+        });
+    }
+
+    return pages;
 }
 
 function dataUrlToBlob(dataUrl) {
@@ -1075,11 +1294,18 @@ function buildRenamedPdfName(nfDigits) {
 function clearRenamedLinks() {
     for (const u of renamedObjectUrls) URL.revokeObjectURL(u);
     renamedObjectUrls = [];
+    renamedDownloadsState = [];
     $renamed.innerHTML = "";
     $renamed.classList.add("hidden");
+    if ($downloadAll) {
+        $downloadAll.classList.add("hidden");
+        $downloadAll.disabled = false;
+        $downloadAll.textContent = "Baixar PDFs em massa (ZIP)";
+    }
 }
 
 function renderRenamedLinks(downloads) {
+    renamedDownloadsState = [...downloads];
     if (!downloads.length) return;
     const title = document.createElement("h2");
     title.textContent = "PDFs renomeados";
@@ -1093,6 +1319,53 @@ function renderRenamedLinks(downloads) {
         $renamed.appendChild(a);
     }
     $renamed.classList.remove("hidden");
+    if ($downloadAll && downloads.length) {
+        $downloadAll.textContent = `Baixar PDFs em massa (ZIP) (${downloads.length})`;
+        $downloadAll.classList.remove("hidden");
+    }
+}
+
+function uniqueZipName(originalName, usedNames) {
+    const safe = sanitizeFilePart(originalName || "arquivo.pdf") || "arquivo.pdf";
+    if (!usedNames.has(safe)) {
+        usedNames.add(safe);
+        return safe;
+    }
+    const dot = safe.lastIndexOf(".");
+    const base = dot > 0 ? safe.slice(0, dot) : safe;
+    const ext = dot > 0 ? safe.slice(dot) : "";
+    let i = 2;
+    while (true) {
+        const candidate = `${base}_${i}${ext}`;
+        if (!usedNames.has(candidate)) {
+            usedNames.add(candidate);
+            return candidate;
+        }
+        i += 1;
+    }
+}
+
+async function downloadRenamedZip(downloads) {
+    if (!downloads.length) throw new Error("Nenhum PDF renomeado disponível.");
+    if (!window.JSZip) throw new Error("JSZip não carregou. Verifique a conexão.");
+
+    const zip = new window.JSZip();
+    const usedNames = new Set();
+    for (const d of downloads) {
+        const response = await fetch(d.url);
+        if (!response.ok) throw new Error(`Falha ao ler ${d.name}.`);
+        const blob = await response.blob();
+        zip.file(uniqueZipName(d.name, usedNames), blob);
+    }
+
+    const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE" });
+    const zipUrl = URL.createObjectURL(zipBlob);
+    const a = document.createElement("a");
+    const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+    a.href = zipUrl;
+    a.download = `pdfs_renomeados_${stamp}.zip`;
+    a.click();
+    setTimeout(() => URL.revokeObjectURL(zipUrl), 2000);
 }
 
 function queueLabel(status, detail = "") {
@@ -1191,32 +1464,115 @@ async function runQueue(items, concurrency, worker) {
 
 async function processPdfFile(file, item) {
     log(`\nPDF: ${file.name}`);
-    updateQueueItem(item, "processing", "renderizando");
-    const pageImages = await pdfToPageImages(file);
-    const rows = [];
-    const nfCandidates = [];
+    updateQueueItem(item, "processing", "parse PDF");
 
-    for (let i = 0; i < pageImages.length; i++) {
-        updateQueueItem(item, "processing", `página ${i + 1}/${pageImages.length}`);
-        log(`OCR ${file.name} página ${i + 1}/${pageImages.length}...`);
-        const blob = dataUrlToBlob(pageImages[i]);
-        const ocr = await ocrFromImageSmart(blob);
-        let fields = extractFields(ocr.text, ocr.data);
-        fields = await refineNFWithCrop(fields, ocr);
-        rows.push(fields);
-        if (fields.NF) nfCandidates.push(fields.NF);
-        log(`OK ${file.name} pág ${i + 1}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
+    let nativePages = [];
+    try {
+        nativePages = await pdfToNativeXmlPages(file);
+        log(`Parse ${file.name}: ${nativePages.length} página(s) lida(s) do PDF.`);
+    } catch (e) {
+        log(`Parse ${file.name}: falhou (${e.message}). OCR completo será usado.`);
     }
 
-    const bestPdfNF = pickBestCandidateNumber(nfCandidates, 4);
+    if (!nativePages.length) {
+        updateQueueItem(item, "processing", "OCR completo");
+        const pageImages = await pdfToPageImages(file);
+        const rows = [];
+        const xmlPages = [];
+        const nfCandidates = [];
+
+        for (let i = 0; i < pageImages.length; i++) {
+            updateQueueItem(item, "processing", `OCR ${i + 1}/${pageImages.length}`);
+            log(`OCR ${file.name} página ${i + 1}/${pageImages.length}...`);
+            const blob = dataUrlToBlob(pageImages[i]);
+            const ocr = await ocrFromImageSmart(blob);
+            let fields = extractFields(ocr.text, ocr.data);
+            fields = await refineNFWithCrop(fields, ocr);
+            rows.push(fields);
+            xmlPages.push(buildPageXmlSnapshot(i + 1, fields, ocr, "ocr"));
+            if (fields.NF) nfCandidates.push(fields.NF);
+            log(`OK ${file.name} pág ${i + 1}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
+        }
+
+        const bestPdfNF = pickBestCandidateNumber(nfCandidates, 4);
+        const renamedName = buildRenamedPdfName(bestPdfNF);
+        const pdfUrl = URL.createObjectURL(file);
+        renamedObjectUrls.push(pdfUrl);
+        updateQueueItem(item, "done", `${rows.length} página(s)`);
+        log(`Download renomeado: ${renamedName}`);
+
+        return {
+            rows,
+            xmlDocument: {
+                fileName: file.name,
+                sourceType: "pdf",
+                pages: xmlPages
+            },
+            renamedDownload: { url: pdfUrl, name: renamedName }
+        };
+    }
+
+    const rows = nativePages.map(p => ({ ...(p.fields || {}) }));
+    let xmlPages = nativePages.map(p => ({ ...p, fields: { ...(p.fields || {}) } }));
+    const parsedNfCandidates = rows.map(r => normalizeDigits(r.NF)).filter(Boolean);
+
+    const ocrFallbackPages = [];
+    for (let i = 0; i < nativePages.length; i++) {
+        const hasNativeText = !isEmptyField(nativePages[i].text);
+        const hasNativeNf = !isEmptyField(rows[i]?.NF);
+        if (!hasNativeText || !hasNativeNf) {
+            ocrFallbackPages.push(i + 1);
+        }
+    }
+
+    if (ocrFallbackPages.length) {
+        updateQueueItem(item, "processing", `OCR fallback (${ocrFallbackPages.length})`);
+        const { images: fallbackImages, totalPages } = await pdfToPageImagesByNumbers(file, ocrFallbackPages);
+        const imageByPage = new Map(fallbackImages.map(p => [p.pageNumber, p.dataUrl]));
+
+        for (const pageNum of ocrFallbackPages) {
+            const img = imageByPage.get(pageNum);
+            if (!img) continue;
+            updateQueueItem(item, "processing", `OCR pág ${pageNum}/${totalPages}`);
+            log(`OCR fallback ${file.name} página ${pageNum}/${totalPages}...`);
+            const blob = dataUrlToBlob(img);
+            const ocr = await ocrFromImageSmart(blob);
+            let ocrFields = extractFields(ocr.text, ocr.data);
+            ocrFields = await refineNFWithCrop(ocrFields, ocr);
+
+            const idx = pageNum - 1;
+            const merged = mergeFieldsPreferPrimary(rows[idx] || {}, ocrFields);
+            rows[idx] = merged;
+
+            if (!isEmptyField(nativePages[idx]?.text)) {
+                xmlPages[idx] = {
+                    ...xmlPages[idx],
+                    source: "pdf-text+ocr",
+                    fields: { ...merged }
+                };
+            } else {
+                xmlPages[idx] = buildPageXmlSnapshot(pageNum, merged, ocr, "ocr");
+            }
+            log(`OK fallback ${file.name} pág ${pageNum}: CT-e ${merged["CT-e"]} | NF ${merged["NF"]} | CEP ${merged["CEP"]}`);
+        }
+    }
+
+    const bestPdfNF =
+        pickBestCandidateNumber(parsedNfCandidates, 4) ||
+        pickBestCandidateNumber(rows.map(r => r.NF), 4);
     const renamedName = buildRenamedPdfName(bestPdfNF);
     const pdfUrl = URL.createObjectURL(file);
     renamedObjectUrls.push(pdfUrl);
-    updateQueueItem(item, "done", `${pageImages.length} página(s)`);
+    updateQueueItem(item, "done", `${rows.length} página(s)`);
     log(`Download renomeado: ${renamedName}`);
 
     return {
         rows,
+        xmlDocument: {
+            fileName: file.name,
+            sourceType: "pdf",
+            pages: xmlPages
+        },
         renamedDownload: { url: pdfUrl, name: renamedName }
     };
 }
@@ -1229,13 +1585,42 @@ async function processImageFile(file, item) {
     fields = await refineNFWithCrop(fields, ocr);
     log(`OK ${file.name}: CT-e ${fields["CT-e"]} | NF ${fields["NF"]} | CEP ${fields["CEP"]}`);
     updateQueueItem(item, "done", "1 imagem");
-    return { rows: [fields], renamedDownload: null };
+    return {
+        rows: [fields],
+        xmlDocument: {
+            fileName: file.name,
+            sourceType: "image",
+            pages: [buildPageXmlSnapshot(1, fields, ocr, "ocr")]
+        },
+        renamedDownload: null
+    };
+}
+
+if ($downloadAll) {
+    $downloadAll.addEventListener("click", async () => {
+        if (!renamedDownloadsState.length) {
+            log("Nenhum PDF renomeado para download em massa.");
+            return;
+        }
+        const originalLabel = $downloadAll.textContent;
+        $downloadAll.disabled = true;
+        $downloadAll.textContent = "Gerando ZIP...";
+        try {
+            await downloadRenamedZip(renamedDownloadsState);
+            log(`ZIP gerado com ${renamedDownloadsState.length} PDF(s) renomeado(s).`);
+        } catch (e) {
+            log(`ERRO ZIP: ${e.message}`);
+        } finally {
+            $downloadAll.disabled = false;
+            $downloadAll.textContent = originalLabel;
+        }
+    });
 }
 
 $run.addEventListener("click", async () => {
     clearLog();
     setProgress(0);
-    $download.classList.add("hidden");
+    clearOutputDownloads();
     clearRenamedLinks();
     $queue.classList.add("hidden");
     $queue.innerHTML = "";
@@ -1248,6 +1633,7 @@ $run.addEventListener("click", async () => {
 
     try {
         const rows = [];
+        const xmlDocuments = [];
         const renamedDownloads = [];
 
         const queueItems = renderQueue(files);
@@ -1262,10 +1648,12 @@ $run.addEventListener("click", async () => {
                 if (isPdf) {
                     const result = await processPdfFile(f, item);
                     rows.push(...result.rows);
+                    if (result.xmlDocument) xmlDocuments.push(result.xmlDocument);
                     if (result.renamedDownload) renamedDownloads.push(result.renamedDownload);
                 } else if (isImage) {
                     const result = await processImageFile(f, item);
                     rows.push(...result.rows);
+                    if (result.xmlDocument) xmlDocuments.push(result.xmlDocument);
                 } else {
                     updateQueueItem(item, "ignored", "tipo não suportado");
                     log(`\nIgnorado: ${f.name} (tipo não suportado)`);
@@ -1284,16 +1672,27 @@ $run.addEventListener("click", async () => {
         }
 
         const csv = toCSV(rows);
-        const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
+        const csvBlob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+        csvObjectUrl = URL.createObjectURL(csvBlob);
 
-        $download.href = url;
+        $download.href = csvObjectUrl;
         $download.download = "dacte_saida.csv";
         $download.textContent = `Baixar CSV (${rows.length} linha(s))`;
         $download.classList.remove("hidden");
+
+        const xml = toDocLikeXml(xmlDocuments);
+        const xmlBlob = new Blob([xml], { type: "application/xml;charset=utf-8" });
+        xmlObjectUrl = URL.createObjectURL(xmlBlob);
+        if ($downloadXml) {
+            $downloadXml.href = xmlObjectUrl;
+            $downloadXml.download = "dacte_saida.xml";
+            $downloadXml.textContent = `Baixar XML (${xmlDocuments.length} doc(s))`;
+            $downloadXml.classList.remove("hidden");
+        }
+
         renderRenamedLinks(renamedDownloads);
 
-        log("\nPronto. Fila concluída. Clique em “Baixar CSV” e/ou nos PDFs renomeados.");
+        log("\nPronto. Fila concluída. Clique em “Baixar CSV”, “Baixar XML”, “Baixar PDFs em massa (ZIP)” e/ou nos PDFs renomeados.");
     } finally {
         queueProgressMode = false;
         $run.disabled = false;
